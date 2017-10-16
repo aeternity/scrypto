@@ -141,6 +141,7 @@ class AVLBatchSpecification extends PropSpec with GeneratorDrivenPropertyChecks 
           val m = Insert(ADKey @@ aKey, ADValue @@ aValue)
 
           val digest = prover.digest
+
           prover.performOneOperation(m)
           val pf = prover.generateProof()
           prover.digest
@@ -542,6 +543,94 @@ class AVLBatchSpecification extends PropSpec with GeneratorDrivenPropertyChecks 
 
     val prover2 = PersistentBatchAVLProver.create(new BatchAVLProver[T, HF](KL, Some(VL)), storage, paranoidChecks = true).get
     prover2.digest shouldEqual prover.digest
+  }
+
+  property("AVL+ tree determinism with parsistent prover") {
+    val storage = new VersionedAVLStorageMock[T]
+    val p = new BatchAVLProver[T, HF](KL, Some(VL))
+    val prover = PersistentBatchAVLProver.create[T, HF](p, storage, paranoidChecks = true).get
+    var digest = prover.digest
+
+    forAll(kvGen) { case (aKey, aValue) =>
+      val m = Insert(aKey, aValue)
+      prover.performOneOperation(m)
+      val pf = prover.generateProofAndUpdateStorage()
+
+      val verifier = new BatchAVLVerifier[T, HF](digest, pf, KL, Some(VL))
+      verifier.digest.get
+      verifier.performOneOperation(m)
+
+      println("(1) added key: " + aKey.mkString("-") +
+        "with value: " + Base58.encode(aValue))
+
+      prover.digest should not equal digest
+      prover.digest shouldEqual verifier.digest.get
+
+      prover.rollback(digest).isSuccess shouldBe true
+      prover.digest shouldEqual digest
+      prover.performOneOperation(m)
+      prover.generateProofAndUpdateStorage()
+      digest = prover.digest
+    }
+
+    forAll(kvGen) { case (aKey, aValue) =>
+      val digestBefore = prover.digest
+
+      println("prover digest before insertion: " + digestBefore.mkString("-"))
+
+      val m1 = Insert(aKey, aValue)
+
+      println("(2) adding key: " + aKey.mkString("-") +
+        "with value: " + Base58.encode(aValue))
+
+      val insertResultP = prover.performOneOperation(m1)
+      insertResultP.isSuccess shouldBe true
+      val pf = prover.generateProofAndUpdateStorage()
+      prover.unauthenticatedLookup(aKey) should not equal None
+
+      val digestAfterInsertionP = prover.digest
+
+      println("prover digest after insertion: " + digestAfterInsertionP.mkString("-"))
+      println("prover tree after insertion: " + prover.toString)
+
+      val verifier = new BatchAVLVerifier[T, HF](digestBefore, pf, KL, Some(VL))
+      verifier.digest.get
+      val insertResultV = verifier.performOneOperation(m1)
+      insertResultV.isSuccess shouldBe true
+      val digestAfterInsertionV = verifier.digest.get
+      println("verifier tree after insertion: " + verifier.toString)
+
+      println("verifier digest after insertion: " + digestAfterInsertionV.mkString("-"))
+      digestAfterInsertionV shouldBe digestAfterInsertionP
+
+      val m2 = Remove(aKey)
+      val removalResultP = prover.performOneOperation(m2)
+      removalResultP.isSuccess shouldBe true
+      removalResultP.get should not equal None
+      println("removal result with prover: " + Base58.encode(removalResultP.get.get))
+      prover.unauthenticatedLookup(aKey) shouldBe None
+      val pf2 = prover.generateProofAndUpdateStorage()
+
+      println("(3) removed key: " + aKey.mkString("-"))
+      val digestAfterRemovalP = prover.digest
+
+      println("prover digest after removal: " + digestAfterRemovalP.mkString("-"))
+      println("prover tree after removal: " + prover.toString)
+
+      val verifier2 = new BatchAVLVerifier[T, HF](digestAfterInsertionP, pf2, KL, Some(VL))
+      verifier2.digest.get
+
+      val removalResultV = verifier2.performOneOperation(m2)
+      removalResultV should not equal None
+      println("removal result with verifier: " + Base58.encode(removalResultV.get.get))
+      val digestAfterRemovalV = verifier2.digest.get
+      println("verifier digest after removal: " + digestAfterRemovalV.mkString("-"))
+      println("verifier tree after removal: " + verifier2.toString)
+      println("\n\n")
+
+      digestAfterRemovalP shouldEqual digestBefore
+      digestAfterRemovalV shouldEqual digestBefore
+    }
   }
 
   property("Updates with and without batching should lead to the same tree") {
